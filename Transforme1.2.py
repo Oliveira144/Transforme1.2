@@ -4,7 +4,6 @@ import os
 import time
 from datetime import datetime
 
-# --- CLASSE PARA GERENCIAR O ESTADO E A LÓGICA ---
 class PredictiveAnalyzer:
     def __init__(self):
         self.emoji_map = {'C': '🔴', 'V': '🔵', 'E': '🟡'}
@@ -143,17 +142,29 @@ class PredictiveAnalyzer:
             
         # Padrão: Alternância
         if len(results) >= 2 and results[-1] != results[-2]:
-            patterns.append({'type': 'alternating', 'description': 'Padrão alternado (Ex: C V C)'})
+            patterns.append({
+                'type': 'alternating',
+                'description': 'Padrão alternado (Ex: C V C)',
+                'priority': 3  # Prioridade inicial
+            })
 
         # Padrão: 2x2
         if len(results) >= 4:
             last4 = results[-4:]
             if last4[0] == last4[1] and last4[2] == last4[3] and last4[0] != last4[2]:
-                patterns.append({'type': '2x2', 'description': 'Padrão 2x2 (Ex: CCVV)'})
+                patterns.append({
+                    'type': '2x2',
+                    'description': 'Padrão 2x2 (Ex: CCVV)',
+                    'priority': 2
+                })
                 
         # Padrão: 2x Repetição
         if len(results) >= 3 and results[-1] == results[-2] and results[-2] == results[-3]:
-            patterns.append({'type': 'triple_rep', 'description': f'Padrão de repetição (Ex: {results[-1]} {results[-1]} {results[-1]})'})
+            patterns.append({
+                'type': 'triple_rep',
+                'description': f'Padrão de repetição (Ex: {results[-1]} {results[-1]} {results[-1]})',
+                'priority': 4
+            })
 
         return patterns
 
@@ -211,30 +222,46 @@ class PredictiveAnalyzer:
         return 'Baixo'
         
     def make_prediction(self, data, patterns):
+        """Faz uma previsão considerando prioridades aprendidas"""
         results = [d['result'] for d in data]
         last_result = results[-1]
         prediction = {'color': None, 'confidence': 0}
         
-        # Lógica de previsão aprimorada
-        streak = next((p for p in patterns if p['type'] == 'streak' and p['color'] != 'E'), None)
-        alternating = next((p for p in patterns if p['type'] == 'alternating'), None)
+        # Calcula prioridades padrão
+        for p in patterns:
+            if 'priority' not in p:
+                p['priority'] = 1
+                if p['type'] == 'streak' and p['length'] > 2:
+                    p['priority'] += p['length']
+                elif p['type'] == 'alternating':
+                    p['priority'] += 3
+
+        # Ordena padrões por prioridade
+        sorted_patterns = sorted(patterns, key=lambda x: x.get('priority', 0), reverse=True)
         
-        if streak and streak['length'] >= 3:
-            other_colors = ['C', 'V']
-            other_colors.remove(streak['color'])
-            prediction['color'] = other_colors[0]
-            prediction['confidence'] = min(95, 50 + streak['length'] * 8)
-        elif alternating and last_result in ['C', 'V']:  # Só aplica se não for empate
-            prediction['color'] = 'C' if last_result == 'V' else 'V'
-            prediction['confidence'] = 75
-        else:
-            # Previsão padrão baseada no último resultado não-empate
+        # Usa o padrão de maior prioridade para previsão
+        for p in sorted_patterns:
+            if p['type'] == 'streak' and p['length'] >= 2:
+                other_colors = ['C', 'V']
+                if p['color'] in other_colors:
+                    other_colors.remove(p['color'])
+                    prediction['color'] = other_colors[0]
+                    prediction['confidence'] = min(90, 40 + p['length'] * 10)
+                    break
+                    
+            elif p['type'] == 'alternating' and last_result in ['C', 'V']:
+                prediction['color'] = 'C' if last_result == 'V' else 'V'
+                prediction['confidence'] = 75
+                break
+                
+        # Fallback para previsão padrão
+        if not prediction['color']:
             non_tie_results = [r for r in results if r != 'E']
             if non_tie_results:
                 last_non_tie = non_tie_results[-1]
                 prediction['color'] = 'C' if last_non_tie == 'V' else 'V'
                 prediction['confidence'] = 55
-            
+                
         return prediction
 
     def get_recommendation(self, risk, manipulation, patterns):
@@ -245,6 +272,7 @@ class PredictiveAnalyzer:
         return 'Observar'
 
     def verify_previous_prediction(self, current_outcome):
+        """Verifica a previsão anterior e aplica aprendizado adaptativo"""
         for i in reversed(range(len(self.signals))):
             signal = self.signals[i]
             if signal.get('correct') is None:
@@ -252,10 +280,35 @@ class PredictiveAnalyzer:
                 if signal['prediction'] == current_outcome:
                     self.performance['hits'] += 1
                     signal['correct'] = "✅"
+                    self.adaptive_learning(was_correct=True)
                 else:
                     self.performance['misses'] += 1
                     signal['correct'] = "❌"
+                    self.adaptive_learning(was_correct=False)
                 return
+
+    def adaptive_learning(self, was_correct):
+        """Ajusta a lógica de previsão com base no sucesso/fracasso recente"""
+        # Aumenta a sensibilidade a padrões alternados após erros
+        if not was_correct:
+            # Busca padrões alternados no histórico recente
+            alt_patterns = [p for p in self.analysis['patterns'] if p['type'] == 'alternating']
+            if alt_patterns:
+                # Prioriza padrões alternados na próxima análise
+                for p in self.analysis['patterns']:
+                    if p['type'] == 'alternating':
+                        p['priority'] = min(10, p.get('priority', 0) + 3)
+        
+        # Reduz a confiança em sequências longas após erros consecutivos
+        streak_errors = sum(1 for s in self.signals[-3:] 
+                            if s.get('correct') == "❌" 
+                            and any(p['type'] == 'streak' for p in s['patterns']))
+        
+        if streak_errors >= 2:
+            # Diminui a prioridade de padrões de sequência
+            for p in self.analysis['patterns']:
+                if p['type'] == 'streak':
+                    p['priority'] = max(0, p.get('priority', 0) - 2)
 
     def get_accuracy(self):
         if self.performance['total'] == 0:
@@ -263,7 +316,7 @@ class PredictiveAnalyzer:
         return (self.performance['hits'] / self.performance['total']) * 100
 
 # --- INTERFACE DO USUÁRIO STREAMLIT ---
-st.set_page_config(page_title="Sistema de Análise Preditiva - Versão Corrigida", layout="wide", page_icon="🎰")
+st.set_page_config(page_title="Sistema de Análise Preditiva - Versão Adaptativa", layout="wide", page_icon="🎰")
 st.title("🎰 Sistema de Análise Preditiva - Cassino")
 st.markdown("---")
 
@@ -331,10 +384,12 @@ if analysis['prediction']:
         <div style="font-size: 40px; font-weight: bold; color: #fff; text-shadow: 2px 2px 4px rgba(0,0,0,0.5);">
             {display_prediction}
         </div>
+        <div style="font-size: 24px; margin-top: 10px;">
+            Confiança: {analysis['confidence']}%
+        </div>
     </div>
     """, unsafe_allow_html=True)
     
-    st.write(f"**Confiança:** {analysis['confidence']}%")
     st.write(f"**Recomendação:** {analysis['recommendation']}")
     st.write(f"**Nível de Risco:** {analysis['riskLevel']}")
     st.write(f"**Possível Manipulação:** {analysis['manipulation']}")
@@ -342,7 +397,8 @@ if analysis['prediction']:
     if analysis['patterns']:
         st.write("### Padrões Detectados:")
         for p in analysis['patterns']:
-            st.write(f"- {p['description']}")
+            priority_info = f" (Prioridade: {p.get('priority', 1)})" if 'priority' in p else ""
+            st.write(f"- {p['description']}{priority_info}")
 else:
     st.info("Nenhum resultado registrado ainda. Adicione resultados para iniciar a análise.")
 
@@ -355,6 +411,17 @@ col_met1, col_met2, col_met3 = st.columns(3)
 col_met1.metric("Acurácia", f"{accuracy:.2f}%")
 col_met2.metric("Total de Previsões", analyzer.performance['total'])
 col_met3.metric("Acertos", analyzer.performance['hits'])
+
+# Adicionando gráfico de desempenho
+if analyzer.performance['total'] > 0:
+    hit_rate = analyzer.performance['hits'] / analyzer.performance['total']
+    miss_rate = analyzer.performance['misses'] / analyzer.performance['total']
+    
+    chart_data = {
+        'Métrica': ['Acertos', 'Erros'],
+        'Taxa': [hit_rate, miss_rate]
+    }
+    st.bar_chart(chart_data, x='Métrica', y='Taxa', use_container_width=True)
 
 st.markdown("---")
 
@@ -394,12 +461,20 @@ if analyzer.signals:
             align-items: center;
             box-shadow: 0 4px 8px rgba(0,0,0,0.1);
         ">
-            <div><strong>Sinal para aposta em:</strong></div>
+            <div>
+                <strong>Sinal para aposta em:</strong><br>
+                <small>{signal['time']}</small>
+            </div>
             <div style="font-size: 24px; font-weight: bold;">{display}</div>
-            <div style="color: {'green' if status == '✅' else 'red' if status == '❌' else 'gray'}; font-weight: bold; font-size: 24px;">
+            <div style="color: {'green' if status == '✅' else 'red' if status == '❌' else 'gray'}; 
+                         font-weight: bold; font-size: 24px;">
                 {status}
             </div>
         </div>
         """, unsafe_allow_html=True)
+        
+        if 'patterns' in signal and signal['patterns']:
+            patterns_info = " | ".join([p['description'] for p in signal['patterns']])
+            st.caption(f"Padrões: {patterns_info}")
 else:
     st.info("Registre resultados para que as sugestões e seu desempenho apareçam aqui.")
