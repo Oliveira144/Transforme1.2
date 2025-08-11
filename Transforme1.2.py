@@ -3,22 +3,31 @@ import json
 import os
 import time
 from datetime import datetime
+import numpy as np
 
 class PredictiveAnalyzer:
     def __init__(self):
         self.emoji_map = {'C': '🔴', 'V': '🔵', 'E': '🟡'}
         self.color_names = {'C': 'Vermelho', 'V': 'Azul', 'E': 'Empate'}
         
+        # --- Dados persistentes ---
         self.history = []
         self.signals = []
         self.performance = {'total': 0, 'hits': 0, 'misses': 0}
+        self.pattern_scores = {
+            'alternating': {'hits': 0, 'total': 0, 'priority': 3},
+            'streak_end': {'hits': 0, 'total': 0, 'priority': 2},
+            '2x2': {'hits': 0, 'total': 0, 'priority': 1}
+        }
+        
+        # --- Análise atual ---
         self.analysis = {
             'patterns': [],
-            'riskLevel': 'low',
-            'manipulation': 'none',
+            'riskLevel': 'Baixo',
+            'volatility': 'Baixa',
             'prediction': None,
             'confidence': 0,
-            'recommendation': 'observar'
+            'recommendation': 'Observar'
         }
         
         self.load_data()
@@ -32,52 +41,60 @@ class PredictiveAnalyzer:
                     self.history = data.get('history', [])
                     self.signals = data.get('signals', [])
                     self.performance = data.get('performance', {'total': 0, 'hits': 0, 'misses': 0})
+                    self.pattern_scores = data.get('pattern_scores', self.pattern_scores)
                 except json.JSONDecodeError:
                     st.warning("Arquivo de dados corrompido. Reiniciando o histórico.")
-                    self.history = []
-                    self.signals = []
-                    self.performance = {'total': 0, 'hits': 0, 'misses': 0}
-
+                    self.clear_history()
+    
     def save_data(self):
         data = {
             'history': self.history,
             'signals': self.signals,
-            'performance': self.performance
+            'performance': self.performance,
+            'pattern_scores': self.pattern_scores
         }
         with open('analyzer_data.json', 'w') as f:
             json.dump(data, f, indent=4)
-
+    
     # --- MÉTODOS DE AÇÃO DO USUÁRIO ---
     def add_outcome(self, outcome):
+        # 1. Verifica a previsão da rodada anterior antes de adicionar o novo resultado
+        self.verify_previous_prediction(outcome)
+        
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.history.append({'result': outcome, 'timestamp': timestamp})
         
-        self.verify_previous_prediction(outcome)
+        # 2. Reanalisa os dados e gera a nova previsão para a próxima rodada
         self.analyze_data()
         
+        # 3. Adiciona o novo sinal (previsão para a próxima rodada)
         if self.analysis['prediction'] is not None:
             self.signals.append({
                 'time': timestamp,
                 'patterns': self.analysis['patterns'],
                 'prediction': self.analysis['prediction'],
-                'correct': None
+                'correct': None,
+                'confidence': self.analysis['confidence']
             })
 
         self.save_data()
 
     def undo_last(self):
         if self.history:
-            self.history.pop()
-            
+            # Reverte a pontuação se a última jogada tiver uma previsão pendente
             if self.signals and self.signals[-1].get('correct') is None:
                 self.signals.pop()
+            
+            # Remove o último resultado do histórico
+            self.history.pop()
 
+            # Recalcula a análise
             if self.history:
                 self.analyze_data()
             else:
                 self.analysis = {
-                    'patterns': [], 'riskLevel': 'low', 'manipulation': 'none',
-                    'prediction': None, 'confidence': 0, 'recommendation': 'observar'
+                    'patterns': [], 'riskLevel': 'Baixo', 'volatility': 'Baixa',
+                    'prediction': None, 'confidence': 0, 'recommendation': 'Observar'
                 }
                 
             self.save_data()
@@ -88,65 +105,69 @@ class PredictiveAnalyzer:
         self.history = []
         self.signals = []
         self.performance = {'total': 0, 'hits': 0, 'misses': 0}
+        self.pattern_scores = {
+            'alternating': {'hits': 0, 'total': 0, 'priority': 3},
+            'streak_end': {'hits': 0, 'total': 0, 'priority': 2},
+            '2x2': {'hits': 0, 'total': 0, 'priority': 1}
+        }
         self.analysis = {
-            'patterns': [], 'riskLevel': 'low', 'manipulation': 'none',
-            'prediction': None, 'confidence': 0, 'recommendation': 'observar'
+            'patterns': [], 'riskLevel': 'Baixo', 'volatility': 'Baixa',
+            'prediction': None, 'confidence': 0, 'recommendation': 'Observar'
         }
         self.save_data()
     
-    # --- MÉTODOS DE ANÁLISE ---
+    # --- MÉTODOS DE ANÁLISE E APRENDIZADO DA IA ---
     def analyze_data(self):
         data = self.history
         if len(data) < 3:
             self.analysis = {
-                'patterns': [], 'riskLevel': 'low', 'manipulation': 'none',
-                'prediction': None, 'confidence': 0, 'recommendation': 'observar'
+                'patterns': [], 'riskLevel': 'Baixo', 'volatility': 'Baixa',
+                'prediction': None, 'confidence': 0, 'recommendation': 'Observar'
             }
             return
 
-        recent_data = data[-27:]
+        recent_data = data[-90:]
         
         patterns = self.detect_patterns(recent_data)
-        risk_level = self.assess_risk(recent_data)
-        manipulation = self.detect_manipulation(recent_data)
+        risk_level = self._calculate_statistical_bias(recent_data)
+        volatility = self._assess_volatility(recent_data)
         prediction_result = self.make_prediction(recent_data, patterns)
         
         self.analysis = {
             'patterns': patterns,
             'riskLevel': risk_level,
-            'manipulation': manipulation,
+            'volatility': volatility,
             'prediction': prediction_result['color'],
             'confidence': prediction_result['confidence'],
-            'recommendation': self.get_recommendation(risk_level, manipulation, patterns)
+            'recommendation': self.get_recommendation(risk_level, volatility, prediction_result['confidence'])
         }
 
     def detect_patterns(self, data):
         patterns = []
         results = [d['result'] for d in data]
 
-        # Padrão: Sequência (Streak)
-        current_streak = 1
-        current_color = results[-1]
-        for i in range(len(results) - 2, -1, -1):
-            if results[i] == current_color:
-                current_streak += 1
-            else:
-                break
-        if current_streak >= 2:
-            patterns.append({
-                'type': 'streak',
-                'color': current_color,
-                'length': current_streak,
-                'description': f"{current_streak}x {self.color_names[current_color]} seguidos"
-            })
-            
         # Padrão: Alternância
-        if len(results) >= 2 and results[-1] != results[-2]:
+        if len(results) >= 2 and results[-1] != results[-2] and len(set(results[-2:])) == 2:
             patterns.append({
                 'type': 'alternating',
-                'description': 'Padrão alternado (Ex: C V C)',
-                'priority': 3  # Prioridade inicial
+                'description': f'Padrão alternado (Ex: {results[-2]} {results[-1]}...)'
             })
+        
+        # Padrão: Fim de Sequência
+        if len(results) >= 2 and results[-1] != results[-2]:
+            streak_length = 1
+            for i in range(len(results) - 2, -1, -1):
+                if results[i] == results[-2]:
+                    streak_length += 1
+                else:
+                    break
+            if streak_length >= 2:
+                patterns.append({
+                    'type': 'streak_end',
+                    'color': results[-2],
+                    'length': streak_length,
+                    'description': f'Fim de Sequência: {streak_length}x {self.color_names[results[-2]]}'
+                })
 
         # Padrão: 2x2
         if len(results) >= 4:
@@ -154,161 +175,135 @@ class PredictiveAnalyzer:
             if last4[0] == last4[1] and last4[2] == last4[3] and last4[0] != last4[2]:
                 patterns.append({
                     'type': '2x2',
-                    'description': 'Padrão 2x2 (Ex: CCVV)',
-                    'priority': 2
+                    'description': 'Padrão 2x2 (Ex: CCVV)'
                 })
-                
-        # Padrão: 2x Repetição
-        if len(results) >= 3 and results[-1] == results[-2] and results[-2] == results[-3]:
-            patterns.append({
-                'type': 'triple_rep',
-                'description': f'Padrão de repetição (Ex: {results[-1]} {results[-1]} {results[-1]})',
-                'priority': 4
-            })
 
         return patterns
 
-    def assess_risk(self, data):
+    def _calculate_statistical_bias(self, data):
         results = [d['result'] for d in data]
-        risk_score = 0
+        if not results: return 'Baixo'
         
-        # Streaks longos aumentam o risco
-        max_streak = 1
-        current_streak = 1
-        if results:
-            current_color = results[0]
-            for i in range(1, len(results)):
-                if results[i] == current_color:
-                    current_streak += 1
-                    max_streak = max(max_streak, current_streak)
-                else:
-                    current_streak = 1
-                    current_color = results[i]
+        c_count = results.count('C')
+        v_count = results.count('V')
+        e_count = results.count('E')
         
-        if max_streak >= 5: risk_score += 40
-        elif max_streak >= 4: risk_score += 25
-        elif max_streak >= 3: risk_score += 10
+        total_non_tie = c_count + v_count
         
-        # Empates consecutivos
-        tie_streak = 0
-        for r in reversed(results):
-            if r == 'E':
-                tie_streak += 1
-            else:
-                break
-        if tie_streak >= 2: risk_score += 30
+        # Análise do desvio de empates
+        expected_e_ratio = 0.027  # Probabilidade teórica de empate
+        actual_e_ratio = e_count / len(results)
+        
+        if actual_e_ratio > expected_e_ratio * 3 or e_count >= 3:
+            return 'Alto'
 
-        if risk_score >= 50: return 'Alto'
-        if risk_score >= 25: return 'Médio'
+        # Análise do desvio entre C e V
+        if total_non_tie > 0:
+            c_ratio = c_count / total_non_tie
+            v_ratio = v_count / total_non_tie
+            
+            if abs(c_ratio - 0.5) > 0.15 or abs(v_ratio - 0.5) > 0.15:
+                 return 'Médio'
+                 
         return 'Baixo'
 
-    def detect_manipulation(self, data):
+    def _assess_volatility(self, data):
         results = [d['result'] for d in data]
-        manipulation_score = 0
+        if len(results) < 5: return 'Baixa'
         
-        # Alta frequência de empates
-        if len(results) > 0 and results.count('E') / len(results) > 0.25:
-            manipulation_score += 30
+        # Contagem de mudanças de cor
+        changes = 0
+        for i in range(1, len(results)):
+            if results[i] != results[i-1]:
+                changes += 1
         
-        # Padrões previsíveis
-        if len(results) >= 6:
-            recent6 = results[-6:]
-            p1, p2 = recent6[:3], recent6[3:]
-            if len(set(p1)) == 1 and len(set(p2)) == 1 and p1[0] != p2[0]:
-                manipulation_score += 25
+        change_rate = changes / len(results)
+        
+        if change_rate < 0.2:
+            return 'Alta' # Menos mudanças = sequências longas
+        if change_rate > 0.6:
+            return 'Baixa' # Muitas mudanças = alternância
+        
+        return 'Média'
 
-        if manipulation_score >= 40: return 'Alto'
-        if manipulation_score >= 20: return 'Médio'
-        return 'Baixo'
-        
     def make_prediction(self, data, patterns):
-        """Faz uma previsão considerando prioridades aprendidas"""
         results = [d['result'] for d in data]
         last_result = results[-1]
-        prediction = {'color': None, 'confidence': 0}
         
-        # Calcula prioridades padrão
+        # Padrão de maior prioridade
+        best_pattern_type = None
+        highest_priority = 0
+        
+        # Ajusta prioridade com base na taxa de acerto do aprendizado
+        for p_type, scores in self.pattern_scores.items():
+            if scores['total'] > 5 and scores['hits'] / scores['total'] > 0.5:
+                scores['priority'] = int(min(5, (scores['hits'] / scores['total']) * 5))
+            else:
+                scores['priority'] = max(1, scores['priority'] - 1)
+        
         for p in patterns:
-            if 'priority' not in p:
-                p['priority'] = 1
-                if p['type'] == 'streak' and p['length'] > 2:
-                    p['priority'] += p['length']
-                elif p['type'] == 'alternating':
-                    p['priority'] += 3
-
-        # Ordena padrões por prioridade
-        sorted_patterns = sorted(patterns, key=lambda x: x.get('priority', 0), reverse=True)
+            p_type = p['type']
+            priority = self.pattern_scores.get(p_type, {}).get('priority', 1)
+            
+            if priority > highest_priority:
+                highest_priority = priority
+                best_pattern_type = p_type
+                
+        # Faz a previsão com base no padrão de maior prioridade
+        prediction = {'color': None, 'confidence': 0, 'pattern_type': None}
+        if best_pattern_type == 'alternating':
+            prediction['color'] = 'C' if last_result == 'V' else 'V'
+            prediction['pattern_type'] = 'alternating'
+        elif best_pattern_type == 'streak_end':
+            # Previsão: quebra da sequência
+            streak_color = [p['color'] for p in patterns if p['type'] == 'streak_end'][0]
+            prediction['color'] = 'C' if streak_color == 'V' else 'V'
+            prediction['pattern_type'] = 'streak_end'
+        elif best_pattern_type == '2x2':
+            prediction['color'] = 'C' if last_result == 'V' else 'V'
+            prediction['pattern_type'] = '2x2'
         
-        # Usa o padrão de maior prioridade para previsão
-        for p in sorted_patterns:
-            if p['type'] == 'streak' and p['length'] >= 2:
-                other_colors = ['C', 'V']
-                if p['color'] in other_colors:
-                    other_colors.remove(p['color'])
-                    prediction['color'] = other_colors[0]
-                    prediction['confidence'] = min(90, 40 + p['length'] * 10)
-                    break
-                    
-            elif p['type'] == 'alternating' and last_result in ['C', 'V']:
-                prediction['color'] = 'C' if last_result == 'V' else 'V'
-                prediction['confidence'] = 75
-                break
-                
-        # Fallback para previsão padrão
-        if not prediction['color']:
-            non_tie_results = [r for r in results if r != 'E']
-            if non_tie_results:
-                last_non_tie = non_tie_results[-1]
-                prediction['color'] = 'C' if last_non_tie == 'V' else 'V'
-                prediction['confidence'] = 55
-                
+        if prediction['pattern_type']:
+            p_type = prediction['pattern_type']
+            scores = self.pattern_scores[p_type]
+            if scores['total'] > 0:
+                prediction['confidence'] = int((scores['hits'] / scores['total']) * 100)
+            else:
+                prediction['confidence'] = 50
+        
         return prediction
 
-    def get_recommendation(self, risk, manipulation, patterns):
-        if risk == 'Alto' or manipulation == 'Alto':
+    def get_recommendation(self, risk, volatility, confidence):
+        if risk == 'Alto' or volatility == 'Alta':
             return 'Evitar'
-        if patterns and risk == 'Baixo':
+        if confidence > 65 and risk == 'Baixo' and volatility == 'Baixa':
             return 'Apostar'
         return 'Observar'
 
     def verify_previous_prediction(self, current_outcome):
-        """Verifica a previsão anterior e aplica aprendizado adaptativo"""
         for i in reversed(range(len(self.signals))):
             signal = self.signals[i]
             if signal.get('correct') is None:
                 self.performance['total'] += 1
+                
+                # Aplica o aprendizado adaptativo
                 if signal['prediction'] == current_outcome:
                     self.performance['hits'] += 1
                     signal['correct'] = "✅"
-                    self.adaptive_learning(was_correct=True)
+                    self._update_learning_score(signal, was_correct=True)
                 else:
                     self.performance['misses'] += 1
                     signal['correct'] = "❌"
-                    self.adaptive_learning(was_correct=False)
+                    self._update_learning_score(signal, was_correct=False)
                 return
 
-    def adaptive_learning(self, was_correct):
-        """Ajusta a lógica de previsão com base no sucesso/fracasso recente"""
-        # Aumenta a sensibilidade a padrões alternados após erros
-        if not was_correct:
-            # Busca padrões alternados no histórico recente
-            alt_patterns = [p for p in self.analysis['patterns'] if p['type'] == 'alternating']
-            if alt_patterns:
-                # Prioriza padrões alternados na próxima análise
-                for p in self.analysis['patterns']:
-                    if p['type'] == 'alternating':
-                        p['priority'] = min(10, p.get('priority', 0) + 3)
-        
-        # Reduz a confiança em sequências longas após erros consecutivos
-        streak_errors = sum(1 for s in self.signals[-3:] 
-                            if s.get('correct') == "❌" 
-                            and any(p['type'] == 'streak' for p in s['patterns']))
-        
-        if streak_errors >= 2:
-            # Diminui a prioridade de padrões de sequência
-            for p in self.analysis['patterns']:
-                if p['type'] == 'streak':
-                    p['priority'] = max(0, p.get('priority', 0) - 2)
+    def _update_learning_score(self, signal, was_correct):
+        for p in signal['patterns']:
+            p_type = p['type']
+            if p_type in self.pattern_scores:
+                self.pattern_scores[p_type]['total'] += 1
+                if was_correct:
+                    self.pattern_scores[p_type]['hits'] += 1
 
     def get_accuracy(self):
         if self.performance['total'] == 0:
@@ -316,7 +311,7 @@ class PredictiveAnalyzer:
         return (self.performance['hits'] / self.performance['total']) * 100
 
 # --- INTERFACE DO USUÁRIO STREAMLIT ---
-st.set_page_config(page_title="Sistema de Análise Preditiva - Versão Adaptativa", layout="wide", page_icon="🎰")
+st.set_page_config(page_title="Sistema de Análise Preditiva - IA Avançada", layout="wide", page_icon="🎰")
 st.title("🎰 Sistema de Análise Preditiva - Cassino")
 st.markdown("---")
 
@@ -325,7 +320,7 @@ if 'analyzer' not in st.session_state:
 
 analyzer = st.session_state.analyzer
 
-# --- SEÇÃO DE ENTRADA DE DADOS E CONTROLES ---
+# SEÇÃO DE ENTRADA DE DADOS E CONTROLES
 st.subheader("Entrada de Resultados")
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -354,7 +349,7 @@ with cols_controls[1]:
 
 st.markdown("---")
 
-# --- VISUALIZAÇÃO DE ANÁLISE E RECOMENDAÇÃO ---
+# VISUALIZAÇÃO DE ANÁLISE E RECOMENDAÇÃO
 st.subheader("📈 Análise Atual")
 analysis = analyzer.analysis
 
@@ -391,24 +386,25 @@ if analysis['prediction']:
     """, unsafe_allow_html=True)
     
     st.write(f"**Recomendação:** {analysis['recommendation']}")
-    st.write(f"**Nível de Risco:** {analysis['riskLevel']}")
-    st.write(f"**Possível Manipulação:** {analysis['manipulation']}")
+    st.write(f"**Nível de Risco Estatístico:** {analysis['riskLevel']}")
+    st.write(f"**Nível de Volatilidade:** {analysis['volatility']}")
 
     if analysis['patterns']:
         st.write("### Padrões Detectados:")
         for p in analysis['patterns']:
-            priority_info = f" (Prioridade: {p.get('priority', 1)})" if 'priority' in p else ""
-            st.write(f"- {p['description']}{priority_info}")
+            p_type = p['type']
+            score = analyzer.pattern_scores.get(p_type, {'priority': 0})
+            st.write(f"- {p['description']} (Prioridade: {score['priority']})")
 else:
     st.info("Nenhum resultado registrado ainda. Adicione resultados para iniciar a análise.")
 
 st.markdown("---")
 
-# --- MÉTRICAS DE DESEMPENHO E HISTÓRICO ---
+# MÉTRICAS DE DESEMPENHO E HISTÓRICO
 st.subheader("📊 Métricas de Desempenho")
 accuracy = analyzer.get_accuracy()
 col_met1, col_met2, col_met3 = st.columns(3)
-col_met1.metric("Acurácia", f"{accuracy:.2f}%")
+col_met1.metric("Acurácia Geral", f"{accuracy:.2f}%")
 col_met2.metric("Total de Previsões", analyzer.performance['total'])
 col_met3.metric("Acertos", analyzer.performance['hits'])
 
@@ -448,6 +444,7 @@ if analyzer.signals:
     for signal in analyzer.signals[-5:][::-1]:
         display = analyzer.emoji_map.get(signal['prediction']) + " " + analyzer.color_names.get(signal['prediction'], "...")
         status = signal.get('correct', '...')
+        confidence = signal.get('confidence', 0)
         bg_color = "rgba(0, 255, 0, 0.1)" if status == "✅" else "rgba(255, 0, 0, 0.1)" if status == "❌" else "rgba(128, 128, 128, 0.1)"
         
         st.markdown(f"""
@@ -466,6 +463,7 @@ if analyzer.signals:
                 <small>{signal['time']}</small>
             </div>
             <div style="font-size: 24px; font-weight: bold;">{display}</div>
+            <div style="font-size: 16px;">Confiança: {confidence}%</div>
             <div style="color: {'green' if status == '✅' else 'red' if status == '❌' else 'gray'}; 
                          font-weight: bold; font-size: 24px;">
                 {status}
@@ -478,3 +476,4 @@ if analyzer.signals:
             st.caption(f"Padrões: {patterns_info}")
 else:
     st.info("Registre resultados para que as sugestões e seu desempenho apareçam aqui.")
+
